@@ -1,177 +1,451 @@
-# Pdf Translate API - 模块化重构说明
+# PDF Translate（FastAPI 后端 + 可选 Next.js 前端）
 
-本项目提供 PDF 翻译服务接口（基于 FastAPI）。当前已对 `main.py` 进行模块化拆分和包结构调整，以提升代码可维护性、清晰度和可扩展性。
+本项目提供一个可独立运行的 PDF 翻译服务（FastAPI 后端），并配套一个可静态导出的前端（Next.js）。后端具备：
+- PDF 上传与校验
+- 任务创建、排队调度、并发控制
+- 实时进度推送（WebSocket）
+- 下载令牌与直链下载（支持 Range 分块）
+- 维护与自动恢复（启动时修复/恢复异常任务、定期清理孤儿文件）
 
-## 新的包结构
+前端具备：
+- 拖拽/选择上传、翻译参数配置
+- 任务侧边栏管理（分页、仅看我的）
+- 实时进度展示（WebSocket 自动重连）
+- 一键下载与删除任务（基于 owner_token 或 IP 授权）
+
+本文档包含：
+- API 文档（请求/响应模式 + curl 示例）
+- 环境变量与配置项
+- 运行时行为（维护循环、静态托管、任务恢复）
+- 本地开发与部署（后端、前端静态导出与集成、serve.py/serve.bat 使用）
+
+## 目录
+
+- 项目结构
+- 快速开始
+- 配置与环境变量
+- 运行时行为
+- API 文档
+- 本地开发与部署
+- 迁移说明
+
+## 项目结构（概览）
 
 ```
 pdf_translate/
 ├── app/
-│   ├── __init__.py                 # 应用工厂 create_app，注册中间件与路由
-│   ├── schemas.py                  # Pydantic 请求/响应模型
-│   ├── repositories/
-│   │   ├── __init__.py
-│   │   └── history_repository.py   # 历史记录持久化（保存、查询、删除）
+│   ├── __init__.py                 # 应用工厂 create_app，注册中间件与路由（/api 前缀），静态托管与维护循环
+│   ├── schemas.py                  # Pydantic 请求/响应模型（UploadResponse、TranslationRequest、TaskInfo...）
 │   ├── routers/
-│   │   ├── __init__.py
-│   │   ├── upload.py               # 文件上传接口 /api/upload
-│   │   ├── translate.py            # 翻译任务启动接口 /api/translate
-│   │   └── tasks.py                # 任务查询/删除接口 /api/tasks...
-│   └── services/
-│       ├── __init__.py
-│       └── translation_service.py  # 翻译任务核心服务（启动、运行、取消）
+│   │   ├── upload.py               # /api/upload
+│   │   ├── translate.py            # /api/translate
+│   │   ├── tasks.py                # /api/tasks、/api/client-ip、/api/ws/tasks/{task_id}
+│   │   └── download.py             # /api/tasks/{task_id}/download/token 与 /download
+│   ├── services/
+│   │   └── translation_service.py  # 并发、排队、WS 推送、运行与取消
+│   └── repositories/
+│       └── history_repository.py   # SQLModel/SQLite 持久化
 ├── core/
-│   ├── __init__.py
-│   ├── config.py                   # 环境配置与路径
-│   ├── image_remover.py
-│   ├── image_translate.py
-│   └── path_util.py
-├── hook/
-│   ├── __init__.py
-│   └── babel_doc_hook.py
-├── main.py                         # 应用入口：app = create_app()；兼容旧导入
-├── resources/
-│   └── fonts/
-├── test.py                         # 现有测试脚本（保持兼容）
+│   ├── config.py                   # 环境变量读取、默认值、路径创建
+│   └── path_util.py 等
+├── front/                          # Next.js 前端（静态导出 output: "export"）
+├── serve.py                        # 一键启动脚本（可同时托管前端静态目录）
+├── serve.bat                       # Windows 包装脚本
+├── main.py                         # 兼容旧导入：app = create_app()
 └── README.md
 ```
 
-## 模块职责说明
+## 快速开始
 
-- app/__init__.py
-  - 提供 `create_app()` 应用工厂函数，集中配置 CORS、中间件与路由注册。
+1) 准备环境
+- Python 3.12+
+- Node.js 18+（建议 20+）
 
-- app/schemas.py
-  - 定义 `TranslationRequest`、`DeleteTasksRequest` 等 Pydantic 数据模型。
+2) 后端依赖安装与运行
+- 建议使用虚拟环境：
+  - Windows PowerShell
+    - `python -m venv .venv`
+    - `.\.venv\Scripts\activate`
+  - macOS/Linux
+    - `python -m venv .venv`
+    - `source .venv/bin/activate`
 
-- app/services/translation_service.py
-  - 提供翻译任务的核心逻辑：`start_translation_service()`、`run_translation()`、`cancel_task()`。
-  - 管理运行态内存数据：`active_translations`、`active_tasks`、`connected_clients`。
+- 使用 uv 同步依赖并创建虚拟环境（读取 pyproject.toml / uv.lock）：
+  - `uv sync`
 
-- app/repositories/history_repository.py
-  - 负责任务历史的数据库读写（SQLite）：保存/更新、查询列表、查询状态、删除记录。
+- 运行开发服务（仅 API）：
+  - `uv run uvicorn app:app --host 0.0.0.0 --port 8000`
+  或使用 serve.py（可托管静态前端，见后文）：
+  - `uv run python serve.py --host 0.0.0.0 --port 8000`
 
-- app/routers/*.py
-  - 将具体 HTTP 路由分模块实现：上传、启动翻译、任务查询与删除。
+3) （可选）构建/导出前端并静态托管
+- 前端开发（直连后端 http://localhost:8000/api）：
+  - Windows PowerShell（仅当前终端生效）：
+    - `$env:NEXT_PUBLIC_API_BASE_URL="http://localhost:8000/api"`
+    - `cd front && pnpm i && pnpm dev`
+  - macOS/Linux：
+    - `cd front && NEXT_PUBLIC_API_BASE_URL="http://localhost:8000/api" pnpm dev`
+- 前端构建并静态导出：
+  - `cd front`
+  - `pnpm i`
+  - `pnpm build && pnpm export`
+  - 导出目录：`front/out`
+- 使用 serve.py 同时托管 API 与静态前端：
+  - `uv run python serve.py --host 0.0.0.0 --port 8000 --out-dir front/out`
 
-- main.py
-  - 创建应用实例：`app = create_app()`。
-  - 为兼容现有测试脚本，导出：`TranslationRequest`（schemas）、`start_translation`（translate 路由）。
+## 配置与环境变量
 
-## 接口文档
+后端配置集中于 `core/config.py` 与 `app/services/translation_service.py`；前端通过 `NEXT_PUBLIC_*` 变量配置。未设置的项将使用默认值。
 
-1) 上传文件
-- 路由: POST `/api/upload`
-- 请求: multipart/form-data，字段 `file`（仅支持 PDF）
-- 响应:
-  ```json
-  {
-    "file_id": "uuid",
-    "filename": "xxx.pdf",
-    "size": 12345,
-    "upload_time": "2025-10-27T10:00:00"
-  }
-  ```
+通用目录与存储（后端）
+- `UPLOADS_DIR`：上传临时目录（默认 `data/uploads`）
+- `OUTPUTS_DIR`：翻译结果输出目录（默认 `data/outputs`）
+- `GLOSSARIES_DIR`：术语表目录（默认 `data/glossaries`）
+- `DB_PATH`：SQLite 数据库文件（默认 `data/history.sqlite`）
 
-2) 开始翻译任务
-- 路由: POST `/api/translate`
-- 请求体: `TranslationRequest`
-  ```json
-  {
-    "file_id": "<上传返回的 file_id>",
-    "lang_in": "en",
-    "lang_out": "zh",
-    "qps": 1,
-    "debug": false,
-    "glossary_ids": [],
-    "model": "gpt-4o-mini"
-  }
-  ```
-- 响应:
-  ```json
-  { "task_id": "uuid", "status": "started" }
-  ```
+LLM / OpenAI（由 BabelDoc 使用）
+- `OPENAI_API_KEY`：必需
+- `OPENAI_BASE_URL`：可选（自定义网关）
+- `OPENAI_MODEL`：可选（默认见 core/config.py）
 
-3) 查询任务列表
-- 路由: GET `/api/tasks`
-- 响应: 数组形式任务列表（按更新时间倒序）
+下载与安全（后端）
+- `DOWNLOAD_TOKEN_SECRET`：用于 HMAC 的密钥（默认随机生成，建议显式设置）
+- `DOWNLOAD_TOKEN_TTL_SECONDS`：下载令牌有效期（秒），默认 3600
+- `DOWNLOAD_REQUIRE_OWNER_TOKEN`：若为 true，所有删除/下载必须提供 `X-Owner-Token`（默认 false，允许按 IP 放行）
+- `MAX_CONCURRENT_DOWNLOADS`：下载并发限流，默认 4
+- `DOWNLOAD_LOG_ENABLED`：是否记录下载日志，默认 true
 
-4) 查询任务状态
-- 路由: GET `/api/tasks/{task_id}/status`
-- 响应: 包含 `status`、`progress`、`stage`、`message`、`error`、`start_time`、`end_time` 等字段
+维护与恢复（后端）
+- `MAINTENANCE_ENABLED`：启用后台维护循环（默认 true）
+- `MAINTENANCE_INTERVAL_SECONDS`：维护间隔（默认 60）
+- `MAINTENANCE_DELETE_ORPHANS`：是否清理孤儿上传文件（默认 true）
 
-5) 删除任务（批量）
-- 路由: POST `/api/tasks/delete`
-- 请求体: `DeleteTasksRequest`
-  ```json
-  { "task_ids": ["<task-id-1>", "<task-id-2>"] }
-  ```
-- 响应:
-  ```json
-  {
-    "deleted": ["task-id-1"],
-    "cancelled": ["task-id-1"],
-    "not_found": ["task-id-2"],
-    "errors": {"task-id-3": "错误信息"}
-  }
-  ```
+并发与队列（翻译任务，后端）
+- `MAX_CONCURRENT_TRANSLATIONS`：同时运行的最大任务数（默认 5）；超出会进入内存 `pending_queue` 排队。
 
-## 迁移指南
+静态前端托管（后端）
+- `FRONTEND_OUT_DIR`：可选。若设置，后端会在 `/` 上托管该静态目录（保留 `/api` 前缀的后端路由），支持 SPA 回退到 `index.html`。
 
-- 旧版直接从 `main.py` 导入路由函数与模型：
-  - `from main import TranslationRequest, start_translation`
-  - 在重构后仍然兼容上述导入（`main.py` 中已重新导出）。
+前端环境变量（Next.js，开发或导出时读取）
+- `NEXT_PUBLIC_API_BASE_URL`：前端访问后端 API 的基址；开发时常设为 `http://localhost:8000/api`；导出后若与后端同域同端口部署，可设为 `/api`
+- `NEXT_PUBLIC_TASKS_PAGE_SIZE_DEFAULT`：任务侧边栏分页大小默认值（可选）
+- `NEXT_PUBLIC_ONLY_MINE_DEFAULT`：是否默认勾选“仅看我的”（`true`/`false`，可选）
 
-- 新版推荐导入路径：
-  - 模型：`from app.schemas import TranslationRequest, DeleteTasksRequest`
-  - 启动翻译服务（非路由）：`from app.services.translation_service import start_translation_service`
-  - 路由注册由 `app.create_app()` 自动完成，无需手动引入。
+## 运行时行为
 
-- 启动服务：
-  - 使用 Uvicorn：`uvicorn main:app --reload`
+见 `app/__init__.py` 与 `app/services/translation_service.py`：
 
-### 一键启动（可选构建前端并由 FastAPI 托管静态页面）
+- 启动初始化
+  - 初始化数据库与目录
+  - 执行维护：清理孤儿上传、标记无效任务、修复卡住的 running 任务
+  - 恢复未完成任务（根据数据库状态重新调度）
+- 后台维护循环
+  - 每 `MAINTENANCE_INTERVAL_SECONDS` 秒执行一次
+  - 可清理孤儿文件、修正异常状态
+- 任务并发与排队
+  - `MAX_CONCURRENT_TRANSLATIONS` 控制并发
+  - 超出容量的任务在内存 `pending_queue` 等待，列表接口会给出排队位置
+- WebSocket 实时事件
+  - 事件类型：`progress_update`、`finish`、`error`
+  - 新连接先收到任务状态快照，再接收后续事件
+- 所有权与授权
+  - 任务创建时记录 `owner_ip` 与 `owner_token`
+  - 删除与下载默认按 IP 放行；若 `DOWNLOAD_REQUIRE_OWNER_TOKEN=true` 则必须提供 `X-Owner-Token`
+- 静态前端
+  - 配置 `FRONTEND_OUT_DIR` 或 `serve.py --out-dir` 时，后端会托管静态站点（`/api` 继续作为后端前缀，SPA 走 `index.html` 回退）
 
-提供 `serve.py` 脚本，可选构建前端（Next.js 静态导出到 `front/out`），并由 FastAPI 同一进程托管前端与后端 API。
+## API 文档（基于 /api 前缀）
 
-示例：
+以下示例以本地默认 `http://localhost:8000/api` 为例。
 
-```bash
-# 1) 构建并启动（默认 API 地址 http://localhost:8000/api）
-python serve.py --build-frontend --host 0.0.0.0 --port 8000
+### 1. 上传文件
 
-# 2) 仅启动后端（使用已构建的 front/out）
-python serve.py --host 0.0.0.0 --port 8000
+POST `/api/upload`
 
-# 3) 指定前端 API 地址（构建时注入 NEXT_PUBLIC_API_BASE_URL）
-python serve.py --build-frontend --api-base-url http://localhost:8000/api
+请求（multipart/form-data）
+- `file`：PDF 文件
+
+响应（200）
+```json
+{
+  "file_id": "...",
+  "filename": "xxx.pdf",
+  "size": 123456
+}
 ```
 
-说明：
-- Next.js 已在 `front/next.config.ts` 配置 `output: "export"`，并在 `front/package.json` 增加 `pnpm export` 脚本。
-- 构建过程执行：`pnpm build && pnpm export -o out`，生成静态文件位于 `front/out`。
-- 服务启动后：
-  - 前端页面路径：`/`（例如 http://localhost:8000/）
-  - 后端接口前缀：`/api`（例如 http://localhost:8000/api/tasks）
-- 如需独立前端开发，仍可在 `front` 目录下使用 `pnpm dev` 启动 Next.js 开发服务器。
+curl 示例
+```bash
+curl -F "file=@/path/to/file.pdf" http://localhost:8000/api/upload
+```
 
-## 测试
+### 2. 开始翻译
 
-- 现有 `test.py` 保持可用：
-  ```python
-  from main import TranslationRequest, start_translation
-  ```
-  如需针对路由进行集成测试，推荐使用 `pytest` + `httpx.AsyncClient`。
+POST `/api/translate`
 
-## 设计原则与标准符合性
+请求（application/json，对应 `app/schemas.py` TranslationRequest）
+```json
+{
+  "file_id": "必填，上传返回",
+  "source_lang": "auto|en|zh|...",
+  "target_lang": "en|zh|...",
+  "qps": 1,
+  "model": "gpt-4o-mini|...",
+  "glossaries": ["术语1", "术语2"],
+  "image": { "enable": false, "max_per_page": 1 },
+  "debug": false
+}
+```
 
-- 单个文件代码量控制：将原先集中在 `main.py` 的逻辑按职责拆分到 `routers`、`services`、`repositories` 与 `schemas`，避免单文件过大。
-- 模块职责单一：路由只负责 HTTP 访问；服务层处理业务；仓储层负责持久化；模型定义集中管理。
-- 导入关系清晰：`routers -> services -> repositories -> core.config`，避免循环引用。
-- 保留测试覆盖：兼容旧测试脚本导入路径，便于平滑迁移。
+响应（200，对应 TranslateStartResponse）
+```json
+{
+  "task_id": "...",
+  "status": "queued|running|...",
+  "owner_token": "..."  
+}
+```
 
-## 注意事项
+curl 示例
+```bash
+curl -H "Content-Type: application/json" \
+  -d '{
+    "file_id":"<上传返回的file_id>",
+    "source_lang":"auto",
+    "target_lang":"zh",
+    "qps":1,
+    "model":"gpt-4o-mini",
+    "image":{"enable":false,"max_per_page":1},
+    "debug":false
+  }' \
+  http://localhost:8000/api/translate
+```
 
-- 输出文件位于 `data/outputs/<task_id>`，删除任务会清理该目录但不会删除 `data/uploads` 原文件。
-- 数据库文件位于 `data/history.sqlite`，为 SQLite 格式；仓储层自动建表。
-- WebSocket 客户端通知逻辑仍保留于服务层（`connected_clients`），但未提供专门的 WS 路由，后续可独立扩展。
+### 3. 列出任务
+
+GET `/api/tasks?page=1&page_size=20&only_mine=false`
+
+说明
+- 支持分页
+- `only_mine=true` 时依据 IP 过滤（`X-Forwarded-For` 优先）
+- 对 `queued` 任务返回 `queue_position`（基于内存队列的估算）
+
+响应（200，对应 ListTasksResponse）
+```json
+{
+  "total": 42,
+  "page": 1,
+  "page_size": 20,
+  "tasks": [
+    {
+      "task_id": "...",
+      "status": "queued|running|finished|error|canceled",
+      "filename": "xxx.pdf",
+      "progress": 0.35,
+      "stage": "ocr|translate|render|...",
+      "created_at": 1730000000,
+      "updated_at": 1730001234,
+      "queue_position": 3,
+      "owner_ip": "...",
+      "config": { "source_lang":"auto", "target_lang":"zh" }
+    }
+  ]
+}
+```
+
+curl 示例
+```bash
+curl "http://localhost:8000/api/tasks?page=1&page_size=20&only_mine=true"
+```
+
+### 4. 获取客户端 IP
+
+GET `/api/client-ip`
+
+说明：优先读取 `X-Forwarded-For`。
+
+响应
+```json
+{"ip":"1.2.3.4"}
+```
+
+curl 示例
+```bash
+curl http://localhost:8000/api/client-ip
+```
+
+### 5. 查询任务状态
+
+GET `/api/tasks/{task_id}/status`
+
+说明：优先返回内存 `active_translations` 的最新状态；若不存在则回退数据库。
+
+响应（200，对应 TaskStatusResponse）
+```json
+{
+  "task": {
+    "task_id": "...",
+    "status": "...",
+    "progress": 0.8,
+    "stage": "render",
+    "error": null
+  }
+}
+```
+
+curl 示例
+```bash
+curl http://localhost:8000/api/tasks/<task_id>/status
+```
+
+### 6. 删除任务
+
+POST `/api/tasks/delete`
+
+鉴权
+- 默认：可依据 IP（owner_ip）匹配
+- 若 `DOWNLOAD_REQUIRE_OWNER_TOKEN=true`：必须提供 `X-Owner-Token`
+
+请求（application/json，对应 DeleteTasksRequest）
+```json
+{
+  "task_ids": ["...", "..."]
+}
+```
+
+响应（200，对应 DeleteTasksResponse）
+```json
+{
+  "deleted": ["..."],
+  "not_found": ["..."],
+  "not_owned": ["..."]
+}
+```
+
+curl 示例（基于 owner_token）
+```bash
+curl -X POST -H "Content-Type: application/json" \
+  -H "X-Owner-Token: <owner_token>" \
+  -d '{"task_ids":["<task_id>"]}' \
+  http://localhost:8000/api/tasks/delete
+```
+
+### 7. WebSocket 实时进度
+
+`ws://<host>/api/ws/tasks/{task_id}`
+
+行为
+- 连接建立后立即发送一次当前任务快照
+- 后续按事件推送：
+  - `progress_update`：`{ type, progress, stage, message? }`
+  - `finish`：`{ type, output_file, pages }`
+  - `error`：`{ type, error }`
+
+浏览器/Node 客户端可直接使用标准 WebSocket 连接。
+
+### 8. 创建下载令牌
+
+POST `/api/tasks/{task_id}/download/token?file_type=mono`
+
+说明
+- 支持 `file_type=mono`（译后 PDF），未来可扩展其他类型
+- 鉴权同删除（owner_token 或 IP）
+- 返回短期令牌，可用于直链下载
+
+响应（200，对应 DownloadTokenResponse）
+```json
+{
+  "token":"...",
+  "expires_at": 1730009999
+}
+```
+
+curl 示例（基于 owner_token）
+```bash
+curl -H "X-Owner-Token: <owner_token>" \
+  "http://localhost:8000/api/tasks/<task_id>/download/token?file_type=mono"
+```
+
+### 9. 直链下载（支持 Range）
+
+GET `/api/tasks/{task_id}/download?file_type=mono[&token=...]`  （可附带 `Range` 头）
+
+鉴权
+- 若提供 `token`：验证令牌有效期与签名
+- 否则：尝试依据 IP 或 `X-Owner-Token`（若强制）
+
+响应
+- 200：完整文件
+- 206：带 Range 的分段
+- Content-Disposition：安全文件名
+
+curl 示例（使用下载令牌）
+```bash
+curl -L -o out.pdf \
+  "http://localhost:8000/api/tasks/<task_id>/download?file_type=mono&token=<token>"
+```
+
+curl 示例（Range 断点续传的首 1MB）
+```bash
+curl -H "Range: bytes=0-1048575" -L -o part.pdf \
+  "http://localhost:8000/api/tasks/<task_id>/download?file_type=mono&token=<token>"
+```
+
+## 本地开发与部署
+
+### 后端（仅 API）
+
+开发
+```bash
+uv run uvicorn app:app --reload --host 0.0.0.0 --port 8000
+```
+
+生产/部署
+- 建议结合进程管理与反向代理（如 nginx/caddy）
+- 配置好环境变量（OPENAI_API_KEY、各目录、下载令牌等）
+
+### 前端（Next.js）
+
+开发（连接本地后端）
+```bash
+# Windows PowerShell（仅当前终端生效）
+$env:NEXT_PUBLIC_API_BASE_URL="http://localhost:8000/api"
+cd front
+pnpm i
+pnpm dev
+
+# macOS/Linux
+cd front
+NEXT_PUBLIC_API_BASE_URL="http://localhost:8000/api" pnpm dev
+```
+
+构建并静态导出
+```bash
+cd front
+pnpm i
+pnpm build && pnpm export
+# 生成 front/out
+```
+
+### 使用 serve.py/serve.bat 一键启动
+
+`serve.py` 会启动 FastAPI，并可选托管静态前端（SPA 回退内置）。支持参数：
+- `--host`、`--port`：监听地址与端口
+- `--out-dir`：静态前端目录（如 `front/out`）
+
+示例
+```bash
+uv run python serve.py --host 0.0.0.0 --port 8000 --out-dir front/out
+```
+
+Windows 下可直接执行 `serve.bat`，它会自动尝试 python/py，并透传命令行参数。
+
+## 迁移说明（从旧版到当前结构）
+
+与旧版相比，当前项目将后端与前端模块化，API 前缀统一为 `/api`，并提供 WebSocket、下载令牌、维护恢复等能力。若你从旧版迁移：
+- 参照“配置与环境变量”设置目录与密钥
+- 前端将 API 基址改为 `NEXT_PUBLIC_API_BASE_URL`，或同域部署
+- 删除/下载等敏感操作建议开启 `DOWNLOAD_REQUIRE_OWNER_TOKEN`
+- 静态托管使用 `FRONTEND_OUT_DIR` 或 `serve.py --out-dir`
+
+注意：本版本提供专门的 WebSocket 路由 `/api/ws/tasks/{task_id}`，用于实时进度推送。
