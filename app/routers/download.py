@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Request
+import urllib.parse
 from starlette.responses import StreamingResponse
 from starlette.background import BackgroundTask
 
@@ -357,7 +358,21 @@ async def direct_download(
         safe_name = f"{base}.{lang_out}.pdf"
     except Exception:
         safe_name = path.name
-    headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{safe_name}"
+    # 按 RFC 5987/6266 规范对文件名进行百分号编码，避免响应头非 ASCII 字符导致的 latin-1 编码错误
+    try:
+        # 仅在 filename* 参数中使用 UTF-8 百分号编码（兼容现代浏览器）
+        encoded = urllib.parse.quote(str(safe_name), safe="", encoding="utf-8", errors="strict")
+        # 同时提供一个 ASCII 回退的 filename 参数，兼容旧浏览器/代理
+        ascii_fallback_base = _sanitize_filename_base(str(safe_name[:-4] if str(safe_name).lower().endswith('.pdf') else safe_name))
+        ascii_fallback = ascii_fallback_base.encode('ascii', 'ignore').decode('ascii')
+        if not ascii_fallback:
+            ascii_fallback = 'download'
+        ascii_fallback = ascii_fallback.strip() + '.pdf'
+        # 注意：整个 Header 值必须是可被 latin-1 编码的 ASCII 字符串
+        headers["Content-Disposition"] = f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded}"
+    except Exception:
+        # 退化为纯 ASCII 文件名，避免抛错
+        headers["Content-Disposition"] = "attachment; filename=download.pdf"
     return StreamingResponse(file_iter(), status_code=status_code, media_type=media_type, headers=headers, background=BackgroundTask(finalize))
 
 

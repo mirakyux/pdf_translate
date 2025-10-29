@@ -3,6 +3,8 @@ import logging
 
 from PIL import Image
 from babeldoc.format.pdf.document_il.backend.pdf_creater import PDFCreater
+from babeldoc.translator.translator import OpenAITranslator
+from types import MethodType
 
 from core.image_translate import translate_image
 
@@ -29,6 +31,7 @@ def new_update_page_content_stream(
     logger.info("[实验性] 执行图片翻译处理")
     pg = pdf[page.page_number]
     img_list = pg.get_images(full=True)
+    hook_trans(translation_config)
 
     for idx, img in enumerate(img_list):
         xref = img[0]
@@ -50,6 +53,7 @@ def new_update_page_content_stream(
 
         # 在原位置插入新图
         pg.insert_image(bbox, stream=img_bytes)
+    unhook_trans(translation_config)
 
 def hook():
     PDFCreater.update_page_content_stream = new_update_page_content_stream
@@ -58,3 +62,101 @@ def hook():
 def unhook():
     PDFCreater.update_page_content_stream = old_update_page_content_stream
     logger.info("unhook")
+
+def prompt(self, text):
+    return [
+        {
+            "role": "system",
+            "content": "You are a professional,authentic machine translation engine.",
+        },
+        {
+            "role": "user",
+            "content": f";; Treat next line as plain text input and translate it into {self.lang_out}, output translation ONLY. If translation is unnecessary (e.g. proper nouns, codes, {'{{1}}, etc. '}), return the original text. NO explanations. NO notes. When you find a line break character ('\n'), check whether it splits a single word. If so, fix it by joining the broken word. Then, intelligently reinsert line breaks where they make semantic sense according to the context and target language. Note: if a sentence is complete, do not insert a line break — only break lines where there is a natural semantic division. Input:\n\n{text}",
+        },
+    ]
+
+def hook_trans(translation_config):
+    """仅 hook 指定 config 中 translator 实例的 prompt 函数。
+
+    要求：
+    - 只操作传入的 config（严格校验）。
+    - 仅 hook 该实例的 prompt 方法，并保留原始引用用于恢复。
+    - 支持幂等：重复 hook 不产生副作用。
+    - 保留错误处理机制：当实例无 prompt 方法时抛出错误。
+    """
+    # 严格校验 config
+    if translation_config is None:
+        logger.debug("hook_trans: translation_config is None, skip")
+        return
+
+    translator = getattr(translation_config, "translator", None)
+    if translator is None:
+        # 边界条件：config 中不包含 translator，直接返回
+        logger.debug("hook_trans: translation_config has no 'translator', skip")
+        return
+
+    # 必须存在 prompt 方法
+    if not hasattr(translator, "prompt"):
+        raise AttributeError("hook_trans: translator instance has no 'prompt' method")
+
+    # 幂等：若已 hook 过，则不重复处理
+    if getattr(translator, "_prompt_hooked", False):
+        logger.debug("hook_trans: translator prompt already hooked, skip")
+        return
+
+    try:
+        # 保留原始 prompt 引用以便恢复
+        setattr(translator, "_original_prompt", translator.prompt)
+        # 将新 prompt 绑定到该实例（不影响类或其他实例）
+        translator.prompt = MethodType(prompt, translator)
+        setattr(translator, "_prompt_hooked", True)
+        logger.info("已为指定翻译实例安装 prompt hook（按任务配置启用/禁用）")
+    except Exception as e:
+        # 若出现异常，确保不留下半挂状态
+        try:
+            if hasattr(translator, "_original_prompt") and isinstance(getattr(translator, "_original_prompt"), type(translator.prompt)):
+                translator.prompt = getattr(translator, "_original_prompt")
+        except Exception:
+            pass
+        raise
+
+def unhook_trans(translation_config):
+    """仅恢复指定 config 中 translator 实例的 prompt 函数。
+
+    要求：
+    - 只操作传入的 config。
+    - 完全恢复原始 prompt 方法。
+    - 支持幂等：重复 unhook 不产生副作用。
+    """
+    # 严格校验 config
+    if translation_config is None:
+        logger.debug("unhook_trans: translation_config is None, skip")
+        return
+
+    translator = getattr(translation_config, "translator", None)
+    if translator is None:
+        # 边界条件：config 中不包含 translator，直接返回
+        logger.debug("unhook_trans: translation_config has no 'translator', skip")
+        return
+
+    original = getattr(translator, "_original_prompt", None)
+    if original is None:
+        # 未 hook 或已恢复，幂等处理
+        logger.debug("unhook_trans: no original prompt stored, skip")
+        return
+
+    try:
+        translator.prompt = original
+        # 清理临时属性，避免副作用
+        try:
+            delattr(translator, "_original_prompt")
+        except Exception:
+            setattr(translator, "_original_prompt", None)
+        try:
+            delattr(translator, "_prompt_hooked")
+        except Exception:
+            setattr(translator, "_prompt_hooked", False)
+        logger.info("已恢复指定翻译实例的 prompt（unhook 成功）")
+    except Exception as e:
+        logger.error(f"unhook_trans: 恢复 translator.prompt 失败: {e}")
+        raise

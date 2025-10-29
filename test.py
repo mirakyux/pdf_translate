@@ -22,8 +22,8 @@ class MyTestCase(unittest.TestCase):
             "Cls.ocr_version": OCRVersion.PPOCRV4,
             "Rec.ocr_version": OCRVersion.PPOCRV5,
         })
-        result = rapidocr("C:/Users/yuxiang.jiang/Documents/00trans/test_1.jpg")
-        result.vis("C:/Users/yuxiang.jiang/Documents/00trans/u_test_1.jpg")
+        result = rapidocr("C:/Users/yuxiang.jiang/Documents/00trans/tttt1.png")
+        result.vis("C:/Users/yuxiang.jiang/Documents/00trans/u_tttt1.png")
 
 
 if __name__ == '__main__':

@@ -106,14 +106,19 @@ def translate_image(image: Image.Image,  config) -> Image.Image:
                 tuning = getattr(config, "smart_line_breaks_tuning", None)
             except Exception:
                 tuning = None
-            src_text = _extract_texts(ocr_result, lang_in=lang_in, smart_breaks=smart_breaks, debug=debug_mode, tuning=tuning)
+            # 简单模式：同行以空格拼接，不同行以 \n 拼接
+            simple_mode = True
+            try:
+                simple_mode = bool(getattr(config, "simple_line_join", True))
+            except Exception:
+                simple_mode = True
+            src_text = _extract_texts(ocr_result, lang_in=lang_in, smart_breaks=smart_breaks, debug=debug_mode, tuning=tuning, simple_mode=simple_mode)
         except Exception as e:
             # OCR 异常同样视为该区域不可处理，保持原样
             ts = datetime.now().isoformat()
             logger.error(f"[{ts}] 区域OCR失败，保持原图: region={region}, reason={e}")
             continue
 
-        logger.info(src_text)
         # 调用翻译
         translate_ok = True
         translated_text: Optional[str] = None
@@ -442,7 +447,7 @@ def _extract_texts_basic(ocr_result) -> str:
     return ""
 
 
-def _extract_texts(ocr_result, lang_in: Optional[str] = None, smart_breaks: bool = True, debug: bool = False, tuning: Optional[Dict] = None) -> str:
+def _extract_texts(ocr_result, lang_in: Optional[str] = None, smart_breaks: bool = True, debug: bool = False, tuning: Optional[Dict] = None, simple_mode: bool = False) -> str:
     items = _normalize_ocr_items(ocr_result)
     if not items:
         # 回退到旧逻辑
@@ -455,11 +460,24 @@ def _extract_texts(ocr_result, lang_in: Optional[str] = None, smart_breaks: bool
     lines = _group_items_into_lines(items)
     if debug:
         logger.debug(f"[OCR] 分行数量: {len(lines)}; 每行片段: {[len(ln) for ln in lines]}")
-    # 依据语言与标点，组装段落文本
-    text = _compose_text_with_linebreaks(lines, lang_in, tuning=tuning)
+    # 依据模式组装段落文本
+    if simple_mode:
+        text = _compose_text_simple(lines)
+    else:
+        text = _compose_text_with_linebreaks(lines, lang_in, tuning=tuning)
     if debug:
         logger.debug(f"[OCR] 组装后的文本长度: {len(text)}; 文本预览: {text[:80].replace('\n','\\n')}...")
     return text.strip()
+
+
+def _compose_text_simple(lines: List[List[Dict]]) -> str:
+    """简单拼接：同一行用空格连接，不同行用 \n 连接。"""
+    out_lines: List[str] = []
+    for ln in lines:
+        tokens = [d.get("text", "").strip() for d in ln if d.get("text")]
+        line_text = " ".join([t for t in tokens if t])
+        out_lines.append(line_text)
+    return "\n".join(out_lines)
 
 
 def _normalize_ocr_items(ocr_result) -> List[Dict]:
@@ -469,6 +487,28 @@ def _normalize_ocr_items(ocr_result) -> List[Dict]:
     """
     items: List[Dict] = []
     try:
+        # 结构 0：优先使用 to_json（若可用），通常包含 bbox/text/score
+        try:
+            if hasattr(ocr_result, 'to_json') and callable(getattr(ocr_result, 'to_json')):
+                j = ocr_result.to_json()
+                if isinstance(j, list):
+                    for d in j:
+                        if not isinstance(d, dict):
+                            continue
+                        bbox_raw = d.get('bbox') or d.get('boxes')
+                        text = d.get('text') or d.get('txt') or d.get('content') or d.get('words')
+                        score = d.get('score')
+                        bbox = _bbox_from_any(bbox_raw)
+                        if bbox is not None and text is not None:
+                            items.append({
+                                "text": str(text),
+                                "bbox": bbox,
+                                "score": float(score) if isinstance(score, (int, float)) else None,
+                            })
+        except Exception:
+            # to_json 不可用或解析失败，继续其他路径
+            pass
+
         # 结构 1：RapidOCR 返回 (res, elapse)，其中 res 是列表
         res = None
         if isinstance(ocr_result, tuple) and len(ocr_result) >= 1:
@@ -479,9 +519,18 @@ def _normalize_ocr_items(ocr_result) -> List[Dict]:
 
         # 结构 2：对象属性 boxes/txts/scores
         if hasattr(ocr_result, 'boxes') and hasattr(ocr_result, 'txts'):
-            boxes = list(getattr(ocr_result, 'boxes') or [])
-            txts = list(getattr(ocr_result, 'txts') or [])
-            scores = list(getattr(ocr_result, 'scores') or []) if hasattr(ocr_result, 'scores') else [None] * len(txts)
+            boxes = getattr(ocr_result, 'boxes')
+            txts = getattr(ocr_result, 'txts')
+            scores = getattr(ocr_result, 'scores', None)
+            try:
+                import numpy as _np
+                if isinstance(boxes, _np.ndarray):
+                    boxes = boxes.tolist()
+            except Exception:
+                pass
+            boxes = list(boxes or [])
+            txts = list(txts or [])
+            scores = list(scores or []) if scores is not None else [None] * len(txts)
             for i in range(min(len(boxes), len(txts))):
                 bbox_raw = boxes[i]
                 text = txts[i]
@@ -494,7 +543,7 @@ def _normalize_ocr_items(ocr_result) -> List[Dict]:
                         "score": float(score) if isinstance(score, (int, float)) else None,
                     })
 
-        # 结构 3：通用列表结构
+        # 结构 3：通用列表结构（res 列表）
         if isinstance(res, list):
             for it in res:
                 text = None
@@ -523,6 +572,27 @@ def _normalize_ocr_items(ocr_result) -> List[Dict]:
                             "bbox": bbox,
                             "score": float(score) if isinstance(score, (int, float)) else None,
                         })
+
+        # 结构 4：word_results（单词级结果，包含每个词的 boxes）
+        if hasattr(ocr_result, 'word_results'):
+            try:
+                word_results = getattr(ocr_result, 'word_results') or ()
+                # word_results 是 Tuple[Tuple[str, float, Optional[List[List[int]]]]]
+                for wr in word_results:
+                    if not isinstance(wr, (list, tuple)) or len(wr) < 3:
+                        continue
+                    w_text, w_score, w_boxes = wr[0], wr[1], wr[2]
+                    if w_boxes is None:
+                        continue
+                    bbox = _bbox_from_any(w_boxes)
+                    if bbox is not None and w_text is not None:
+                        items.append({
+                            "text": str(w_text),
+                            "bbox": bbox,
+                            "score": float(w_score) if isinstance(w_score, (int, float)) else None,
+                        })
+            except Exception:
+                pass
     except Exception:
         return []
     return items
@@ -531,7 +601,15 @@ def _normalize_ocr_items(ocr_result) -> List[Dict]:
 def _bbox_from_any(b: object) -> Optional[Tuple[int, int, int, int]]:
     """从多种形式的 bbox（四点或左上右下）转换为 (x0,y0,x1,y1)。"""
     try:
-        # 四点多边形 [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
+        # numpy 数组转换为列表
+        try:
+            import numpy as _np
+            if isinstance(b, _np.ndarray):
+                b = b.tolist()
+        except Exception:
+            pass
+
+        # RapidOCR 常见的四点多边形 [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
         if isinstance(b, (list, tuple)) and len(b) >= 4 and all(isinstance(p, (list, tuple)) and len(p) >= 2 for p in b[:4]):
             xs = [int(p[0]) for p in b[:4]]
             ys = [int(p[1]) for p in b[:4]]
