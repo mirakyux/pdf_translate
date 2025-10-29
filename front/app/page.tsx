@@ -127,12 +127,46 @@ export default function Home() {
     }
   }, [page, pageSize, onlyMine]);
 
+  // 动态轮询策略：
+  // - 当任务列表处于关闭/折叠状态时，停止自动调用 /api/tasks
+  // - 当列表中不包含“当前用户未完成任务”时，降低轮询频率（默认 >=30s，可通过 NEXT_PUBLIC_TASKS_IDLE_POLL_MS 配置）
+  // - 当包含“当前用户未完成任务”时，采用较高频率（默认 3s）
+  const IDLE_POLL_MS = useMemo(() => {
+    const env = Number(process.env.NEXT_PUBLIC_TASKS_IDLE_POLL_MS || 30000);
+    // 保底 30s，避免过于频繁
+    return Math.max(30000, Number.isFinite(env) ? env : 30000);
+  }, []);
+
+  const ACTIVE_POLL_MS = 3000; // 有本人未完成任务时的刷新频率
+
+  // 首次加载：仅在侧边栏展开时获取一次（避免在关闭状态下产生不必要请求）
   useEffect(() => {
-    // 首次加载与定时后台刷新（不显示加载遮挡，不打断用户滚动）
-    refreshTasks(false);
-    const timer = setInterval(() => refreshTasks(false), 3000);
+    if (sidebarOpen) {
+      refreshTasks(false);
+    }
+  }, [sidebarOpen, refreshTasks]);
+
+  // 条件轮询（根据侧边栏展开状态与是否存在本人未完成任务动态调整）
+  useEffect(() => {
+    // 侧边栏关闭则不轮询
+    if (!sidebarOpen) return;
+
+    // 判定是否包含“当前用户未完成任务”
+    const hasOwnUnfinished = tasks.some((t) => {
+      const isMineByIp = !!(t.owner_ip && t.owner_ip === clientIp);
+      const isMineByToken = !!ownerTokens[t.task_id];
+      const isMine = isMineByIp || isMineByToken;
+      const isUnfinished = (t.status === "queued" || t.status === "running");
+      return isMine && isUnfinished;
+    });
+
+    const intervalMs = hasOwnUnfinished ? ACTIVE_POLL_MS : IDLE_POLL_MS;
+    const timer = setInterval(() => {
+      // 后台刷新，不显示加载遮挡、不打断滚动
+      try { refreshTasks(false); } catch {}
+    }, intervalMs);
     return () => clearInterval(timer);
-  }, [refreshTasks]);
+  }, [sidebarOpen, tasks, clientIp, ownerTokens, refreshTasks, IDLE_POLL_MS]);
 
   // 获取客户端 IP，用于前端隐藏非本人上传的下载按钮
   useEffect(() => {

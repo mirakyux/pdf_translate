@@ -170,6 +170,11 @@ def _build_translation_config(task_id: str, request) -> TranslationConfig:
         setattr(config, "enable_image_experimental", bool(getattr(request, "translate_images_experimental", False)))
     except Exception:
         pass
+    # 智能换行/连接判断（OCR 文本后处理），默认开启，可按需关闭
+    try:
+        setattr(config, "smart_line_breaks", True)
+    except Exception:
+        pass
     return config
 
 

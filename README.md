@@ -130,6 +130,7 @@ LLM / OpenAI（由 BabelDoc 使用）
 - `NEXT_PUBLIC_API_BASE_URL`：前端访问后端 API 的基址；开发时常设为 `http://localhost:8000/api`；导出后若与后端同域同端口部署，可设为 `/api`
 - `NEXT_PUBLIC_TASKS_PAGE_SIZE_DEFAULT`：任务侧边栏分页大小默认值（可选）
 - `NEXT_PUBLIC_ONLY_MINE_DEFAULT`：是否默认勾选“仅看我的”（`true`/`false`，可选）
+- `NEXT_PUBLIC_TASKS_IDLE_POLL_MS`：当任务列表中没有“当前用户未完成任务”时的后台轮询间隔（毫秒）。默认不配置时为 30000（30 秒），且最低不小于 30 秒。
 
 ## 运行时行为
 
@@ -153,6 +154,13 @@ LLM / OpenAI（由 BabelDoc 使用）
   - 删除与下载默认按 IP 放行；若 `DOWNLOAD_REQUIRE_OWNER_TOKEN=true` 则必须提供 `X-Owner-Token`
 - 静态前端
   - 配置 `FRONTEND_OUT_DIR` 或 `serve.py --out-dir` 时，后端会托管静态站点（`/api` 继续作为后端前缀，SPA 走 `index.html` 回退）
+
+### 前端任务列表的轮询优化（性能）
+
+- 当右侧任务列表处于关闭/折叠状态时，前端停止自动调用 `/api/tasks`（避免不必要的网络请求）
+- 当当前列表中不包含“本人提交的未完成任务”（基于 IP 或本地保存的 owner_token 判断）时，将后台轮询间隔降低为 `NEXT_PUBLIC_TASKS_IDLE_POLL_MS`（默认≥30秒）
+- 当存在“本人未完成任务”（状态为 `queued` 或 `running`）时，保持较高频率的后台刷新（默认 3 秒）
+- 用户主动在任务列表中点击“刷新”或切换分页/过滤时，始终进行一次完整数据请求，并显示加载提示
 
 ## API 文档（基于 /api 前缀）
 

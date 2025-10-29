@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import logging
 import argparse
 from pathlib import Path
 
@@ -24,6 +25,14 @@ import uvicorn
 
 from app import create_app
 
+
+# 配置详细的日志格式
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+
+logger = logging.getLogger(__name__)
 
 
 

@@ -1,6 +1,8 @@
 import asyncio
 import unittest
 
+from rapidocr import RapidOCR, OCRVersion
+
 from main import TranslationRequest, start_translation
 
 
@@ -14,6 +16,14 @@ class MyTestCase(unittest.TestCase):
                                      debug=False,
                                      glossary_ids=[])
         asyncio.run(start_translation(request))
+    def test_rapid(self):
+        rapidocr = RapidOCR(params={
+            "Det.ocr_version": OCRVersion.PPOCRV5,
+            "Cls.ocr_version": OCRVersion.PPOCRV4,
+            "Rec.ocr_version": OCRVersion.PPOCRV5,
+        })
+        result = rapidocr("C:/Users/yuxiang.jiang/Documents/00trans/test_1.jpg")
+        result.vis("C:/Users/yuxiang.jiang/Documents/00trans/u_test_1.jpg")
 
 
 if __name__ == '__main__':
