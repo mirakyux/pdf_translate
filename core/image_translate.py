@@ -11,6 +11,7 @@ from rapidocr import RapidOCR
 
 from core.image_remover import clean
 from core.path_util import resource_path
+from datetime import datetime
 
 NOTOSANS_FONT_PATH = resource_path('fonts/NotoSans-Medium.ttf')
 
@@ -62,37 +63,79 @@ def translate_image(image: Image.Image,  config) -> Image.Image:
 
     boxes = [item for item in result.boxes if item.cls in (0, 1)]
 
-    regions = []
-    final_result = []
+    # 仅对需要更新的区域进行清理与重绘，满足“失败或无变化不处理”的要求
+    regions_to_clean: List[Tuple[int, int, int, int]] = []
+    draw_jobs: List[Tuple[Tuple[int, int, int, int], str]] = []
+
     for box in boxes:
         x0, y0, x1, y1 = box.xyxy
-        region = tuple([int(x0),
-                        int(y0),
-                        int(x1),
-                        int(y1)])
-        regions.append(region)
+        region: Tuple[int, int, int, int] = (
+            int(x0),
+            int(y0),
+            int(x1),
+            int(y1),
+        )
 
-        # 裁剪
-        region_image = image.crop(tuple(box.xyxy))
-        # OCR
-        ocr_engine = get_ocr_engine()
-        ocr_result = ocr_engine(region_image)
-        txts = _extract_texts(ocr_result)
+        # 裁剪区域并做 OCR
         try:
-            translate = config.translator.translate(txts) if txts else ""
+            region_image = image.crop(tuple(box.xyxy))
+            ocr_engine = get_ocr_engine()
+            ocr_result = ocr_engine(region_image)
+            src_text = _extract_texts(ocr_result)
         except Exception as e:
-            logger.error(f"翻译失败，使用原文回translate退: {e}")
-            translate = txts or ""
+            # OCR 异常同样视为该区域不可处理，保持原样
+            ts = datetime.now().isoformat()
+            logger.error(f"[{ts}] 区域OCR失败，保持原图: region={region}, reason={e}")
+            continue
 
-        final_result.append(tuple([region,  translate]))
+        # 调用翻译
+        translate_ok = True
+        translated_text: Optional[str] = None
+        error_reason: Optional[str] = None
+        try:
+            if src_text:
+                candidate = config.translator.translate(src_text)
+            else:
+                candidate = ""  # 源文本为空时，视为无变化比对依据
 
-    fn_image = clean(image, regions, method="telea")
+            if not isinstance(candidate, str):
+                translate_ok = False
+                error_reason = f"unexpected return type: {type(candidate)}"
+            else:
+                translated_text = candidate
+        except Exception as e:
+            translate_ok = False
+            error_reason = str(e)
 
-    # 将 translate 文字写到 fn_image 的对应区域
+        ts = datetime.now().isoformat()
+        if not translate_ok:
+            # 失败：不清理、不重绘，保留原图，并记录失败日志
+            logger.error(
+                f"[{ts}] 区域翻译失败，已保留原图: region={region}, reason={error_reason}"
+            )
+            continue
+
+        # 比对翻译结果是否与原文完全一致（严格大小写与标点）
+        if translated_text == src_text:
+            logger.debug(
+                f"[{ts}] 无变化翻译，跳过图像处理: region={region}, text_len={len(src_text or '')}"
+            )
+            continue
+
+        # 正常且发生变化的翻译：纳入清理与重绘
+        regions_to_clean.append(region)
+        draw_jobs.append((region, translated_text or ""))
+
+    # 如果无区域需要处理，直接返回原图拷贝，避免不必要处理，提升性能
+    if not regions_to_clean:
+        return image.copy()
+
+    # 执行清理，仅对需要处理的区域进行 inpaint
+    fn_image = clean(image, regions_to_clean, method="telea")
+
+    # 将翻译后的文本写回仅需更新的区域
     draw = ImageDraw.Draw(fn_image)
-    for region, translate in final_result:
-        # 1. 跟据区域大小与文本计算字体大小
-        # 2. 将文本渲染到图片的region区域内
+    for region, translate in draw_jobs:
         x1, y1, x2, y2 = region
         bubble_width = x2 - x1
         bubble_height = y2 - y1

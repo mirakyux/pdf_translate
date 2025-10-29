@@ -449,3 +449,7 @@ Windows 下可直接执行 `serve.bat`，它会自动尝试 python/py，并透�
 - 静态托管使用 `FRONTEND_OUT_DIR` 或 `serve.py --out-dir`
 
 注意：本版本提供专门的 WebSocket 路由 `/api/ws/tasks/{task_id}`，用于实时进度推送。
+
+## 参考项目
+- [BabelDOC](https://github.com/funstory-ai/BabelDOC)
+- [Saber-Translator](https://github.com/MashiroSaber03/Saber-Translator)
