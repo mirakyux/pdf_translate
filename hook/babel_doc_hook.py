@@ -36,7 +36,7 @@ def new_update_page_content_stream(
     if not enabled:
         return
 
-    logger.info("[实验性] 执行图片翻译处理")
+    logger.debug("[实验性] 执行图片翻译处理")
     pg = pdf[page.page_number]
     img_list = pg.get_images(full=True)
     hook_trans(translation_config)
@@ -92,12 +92,12 @@ def new_process(self, document):
 def hook():
     PDFCreater.update_page_content_stream = new_update_page_content_stream
     ParagraphFinder.process = new_process
-    logger.info("已安装图片翻译 hook（按任务配置启用/禁用）")
+    logger.debug("已安装图片翻译 hook（按任务配置启用/禁用）")
 
 def unhook():
     PDFCreater.update_page_content_stream = old_update_page_content_stream
 
-    logger.info("unhook")
+    logger.debug("unhook")
 
 def prompt(self, text):
     return [
@@ -146,7 +146,7 @@ def hook_trans(translation_config):
         # 将新 prompt 绑定到该实例（不影响类或其他实例）
         translator.prompt = MethodType(prompt, translator)
         setattr(translator, "_prompt_hooked", True)
-        logger.info("已为指定翻译实例安装 prompt hook（按任务配置启用/禁用）")
+        logger.debug("已为指定翻译实例安装 prompt hook（按任务配置启用/禁用）")
     except Exception as e:
         # 若出现异常，确保不留下半挂状态
         try:
@@ -192,7 +192,7 @@ def unhook_trans(translation_config):
             delattr(translator, "_prompt_hooked")
         except Exception:
             setattr(translator, "_prompt_hooked", False)
-        logger.info("已恢复指定翻译实例的 prompt（unhook 成功）")
+        logger.debug("已恢复指定翻译实例的 prompt（unhook 成功）")
     except Exception as e:
         logger.error(f"unhook_trans: 恢复 translator.prompt 失败: {e}")
         raise

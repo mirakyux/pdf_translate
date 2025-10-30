@@ -26,6 +26,52 @@ logger = logging.getLogger(__name__)
 # OCR 引擎惰性初始化，避免模块导入时就占用较多资源
 _ocr_engine: Optional[RapidOCR] = None
 
+def _remove_fully_contained_boxes(boxes: Iterable, tolerance: float = 2.0) -> List:
+    """
+    移除“完全被其它更大矩形包含”的小矩形。
+
+    说明：
+    - 仅当一个 box 的四边都在另一个 box 的边界之内（允许 tolerance 像素的误差）时，认为被完全包含。
+    - 被包含的较小 box 会被舍弃；保留外层较大的 box。
+    - 不区分类别，按几何关系处理。
+    """
+
+    def _get_xyxy(b):
+        try:
+            return tuple(b.xyxy)
+        except Exception:
+            try:
+                return (float(b[0]), float(b[1]), float(b[2]), float(b[3]))
+            except Exception:
+                return (0.0, 0.0, 0.0, 0.0)
+
+    def _area(b) -> float:
+        x0, y0, x1, y1 = _get_xyxy(b)
+        return max(0.0, float(x1 - x0) * float(y1 - y0))
+
+    def _contains(outer, inner) -> bool:
+        ix0, iy0, ix1, iy1 = _get_xyxy(inner)
+        ox0, oy0, ox1, oy1 = _get_xyxy(outer)
+        return (
+            ix0 >= ox0 - tolerance and
+            iy0 >= oy0 - tolerance and
+            ix1 <= ox1 + tolerance and
+            iy1 <= oy1 + tolerance
+        )
+
+    # 按面积从大到小排序，逐个检查是否被先前保留的更大 box 完全包含
+    sorted_boxes = sorted(list(boxes), key=_area, reverse=True)
+    kept: List = []
+    for b in sorted_boxes:
+        contained = False
+        for k in kept:
+            if _contains(k, b):
+                contained = True
+                break
+        if not contained:
+            kept.append(b)
+    return kept
+
 def get_ocr_engine() -> RapidOCR:
     global _ocr_engine
     if _ocr_engine is None:
@@ -73,6 +119,8 @@ def translate_image(image: Image.Image,  config) -> Image.Image:
         return image.copy()
     # {0: 'title', 1: 'plain text', 2: 'abandon', 3: 'figure', 4: 'figure_caption', 5: 'table', 6: 'table_caption', 7: 'table_footnote', 8: 'isolate_formula', 9: 'formula_caption'}
     boxes = [item for item in result.boxes if item.cls not in [2, 8, 9]]
+    # 若两个 box 存在“完全包含”关系，舍弃掉小的那个 box
+    boxes = _remove_fully_contained_boxes(boxes, tolerance=2.0)
 
     # 仅对需要更新的区域进行清理与重绘，满足“失败或无变化不处理”的要求
     regions_to_clean: List[Tuple[int, int, int, int]] = []
