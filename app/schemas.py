@@ -9,7 +9,7 @@ class TranslationRequest(BaseModel):
     file_id: str
     lang_in: str
     lang_out: str
-    qps: Optional[int] = 1
+    qps: Optional[int] = 10
     debug: bool = False
     glossary_ids: List[str] = []
     model: str = "gpt-4o-mini"

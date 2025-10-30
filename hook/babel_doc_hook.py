@@ -3,7 +3,6 @@ import logging
 
 from PIL import Image
 from babeldoc.format.pdf.document_il.backend.pdf_creater import PDFCreater
-from babeldoc.translator.translator import OpenAITranslator
 from types import MethodType
 
 from core.image_translate import translate_image
@@ -13,6 +12,11 @@ logger = logging.getLogger(__name__)
 
 old_update_page_content_stream  = PDFCreater.update_page_content_stream
 
+
+# from babeldoc.translator.translator import OpenAITranslator
+# def do_translate(self, text, rate_limit_params: dict = None) -> str:
+#     return text
+# OpenAITranslator.do_translate = do_translate
 
 def new_update_page_content_stream(
         self, check_font_exists, page, pdf, translation_config, skip_char: bool = False
@@ -42,7 +46,7 @@ def new_update_page_content_stream(
         bbox = pg.get_image_bbox(img)  # 获取图片所在位置矩形
 
         # 处理图片
-        image = Image.open(io.BytesIO(image_bytes))
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
         new_image = translate_image(image, translation_config)
 

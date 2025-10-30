@@ -65,7 +65,12 @@ def translate_image(image: Image.Image,  config) -> Image.Image:
 
     # 转np
     np_image = np.array(image)
-    result = config.doc_layout_model.predict(np_image)[0]
+    try:
+        result = config.doc_layout_model.predict(np_image)[0]
+    except Exception as e:
+        ts = datetime.now().isoformat()
+        logger.error(f"[{ts}] 文档布局检测模型异常，已返回原图: {e}")
+        return image.copy()
 
     boxes = [item for item in result.boxes if item.cls in (0, 1)]
 

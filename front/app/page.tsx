@@ -37,7 +37,7 @@ export default function Home() {
   // 翻译配置
   const [langIn, setLangIn] = useState("en");
   const [langOut, setLangOut] = useState("zh");
-  const [qps, setQps] = useState(1);
+  const [qps, setQps] = useState(10);
   const [debug, setDebug] = useState(false);
   const [translateImages, setTranslateImages] = useState(true); // 实验性：翻译图片（默认勾选）
   const [model, setModel] = useState("gpt-4o-mini");
@@ -193,10 +193,22 @@ export default function Home() {
     } catch {}
   }, []);
 
-  // 轮询运行中任务状态
+  // 轮询运行中任务状态（仅在右侧任务列表展开时进行）
   useEffect(() => {
-    const runningIds = tasks.filter((t) => t.status === "running").map((t) => t.task_id);
+    // 侧边栏关闭时不进行状态轮询，避免不必要的 /status 请求
+    if (!sidebarOpen) return;
+
+    // 仅轮询“本人”的运行中任务，降低无关请求：基于 IP 或 ownerToken
+    const runningIds = tasks
+      .filter((t) => {
+        const isMineByIp = !!(t.owner_ip && t.owner_ip === clientIp);
+        const isMineByToken = !!ownerTokens[t.task_id];
+        const isMine = isMineByIp || isMineByToken;
+        return isMine && t.status === "running";
+      })
+      .map((t) => t.task_id);
     if (runningIds.length === 0) return;
+
     const timer = setInterval(async () => {
       try {
         const updates = await Promise.all(runningIds.map((id) => getTaskStatus(id)));
@@ -230,9 +242,10 @@ export default function Home() {
       } catch (e) {
         // 忽略状态轮询错误
       }
-    }, 1500);
+    }, 5000);
+
     return () => clearInterval(timer);
-  }, [tasks]);
+  }, [tasks, sidebarOpen, clientIp, ownerTokens]);
 
   const onUploadAndStart = async () => {
     if (!file) return;
