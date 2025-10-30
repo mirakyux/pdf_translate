@@ -71,8 +71,8 @@ def translate_image(image: Image.Image,  config) -> Image.Image:
         ts = datetime.now().isoformat()
         logger.error(f"[{ts}] 文档布局检测模型异常，已返回原图: {e}")
         return image.copy()
-
-    boxes = [item for item in result.boxes if item.cls in (0, 1)]
+    # {0: 'title', 1: 'plain text', 2: 'abandon', 3: 'figure', 4: 'figure_caption', 5: 'table', 6: 'table_caption', 7: 'table_footnote', 8: 'isolate_formula', 9: 'formula_caption'}
+    boxes = [item for item in result.boxes if item.cls not in [2, 8, 9]]
 
     # 仅对需要更新的区域进行清理与重绘，满足“失败或无变化不处理”的要求
     regions_to_clean: List[Tuple[int, int, int, int]] = []
@@ -87,9 +87,17 @@ def translate_image(image: Image.Image,  config) -> Image.Image:
             int(y1),
         )
 
+        if (box.cls == 5):
+            # 表格直接重新处理
+            region_image = image.crop(region)
+            final_image = translate_image(region_image, config)
+            image.paste(final_image, region)
+            continue
+
         # 裁剪区域并做 OCR
         try:
-            region_image = image.crop(tuple(box.xyxy))
+            region_image = image.crop(region)
+
             ocr_engine = get_ocr_engine()
             ocr_result = ocr_engine(region_image)
             # 根据语言与启用选项，智能进行换行/连接判断

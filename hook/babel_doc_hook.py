@@ -2,8 +2,11 @@ import io
 import logging
 
 from PIL import Image
+from babeldoc.babeldoc_exception.BabelDOCException import ExtractTextError
 from babeldoc.format.pdf.document_il.backend.pdf_creater import PDFCreater
 from types import MethodType
+
+from babeldoc.format.pdf.document_il.midend.paragraph_finder import ParagraphFinder
 
 from core.image_translate import translate_image
 
@@ -11,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 old_update_page_content_stream  = PDFCreater.update_page_content_stream
+old_process = ParagraphFinder.process
 
 
 # from babeldoc.translator.translator import OpenAITranslator
@@ -59,12 +63,40 @@ def new_update_page_content_stream(
         pg.insert_image(bbox, stream=img_bytes)
     unhook_trans(translation_config)
 
+def new_process(self, document):
+        with self.translation_config.progress_monitor.stage_start(
+            self.stage_name,
+            len(document.page),
+        ) as pbar:
+            if not document.page:
+                return
+            for page in document.page:
+                self.translation_config.raise_if_cancelled()
+                self.process_page(page)
+                pbar.advance()
+
+            total_paragraph_count = 0
+            for page in document.page:
+                total_paragraph_count += len(page.pdf_paragraph)
+
+            try:
+                enabled = bool(getattr(self.translation_config, "enable_image_experimental", False))
+            except Exception:
+                enabled = False
+            if not enabled and total_paragraph_count == 0:
+                raise ExtractTextError("The document contains no paragraphs.")
+
+            if not enabled and self.check_cid_paragraph(document):
+                raise ExtractTextError("The document contains too many CID paragraphs.")
+
 def hook():
     PDFCreater.update_page_content_stream = new_update_page_content_stream
+    ParagraphFinder.process = new_process
     logger.info("已安装图片翻译 hook（按任务配置启用/禁用）")
 
 def unhook():
     PDFCreater.update_page_content_stream = old_update_page_content_stream
+
     logger.info("unhook")
 
 def prompt(self, text):
