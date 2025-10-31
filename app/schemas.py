@@ -15,6 +15,8 @@ class TranslationRequest(BaseModel):
     model: str = "gpt-4o-mini"
     # 是否启用“翻译图片（实验性）”功能，默认启用
     translate_images_experimental: bool = True
+    # 是否启用“文字覆写（实验性）”功能，默认关闭；仅在开启图片翻译时生效
+    image_text_overlay: bool = False
 
 
 class DeleteTasksRequest(BaseModel):
@@ -38,6 +40,8 @@ class TaskInfo(BaseModel):
     target_lang: Optional[str] = None
     # 是否启用“翻译图片（实验性）”
     translate_images_experimental: Optional[bool] = None
+    # 是否启用“文字覆写（实验性）”
+    image_text_overlay: Optional[bool] = None
     progress: Optional[float] = 0
     stage: Optional[str] = None
     start_time: Optional[str] = None

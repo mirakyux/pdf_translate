@@ -1,5 +1,6 @@
 import io
 import logging
+import fitz  # PyMuPDF
 
 from PIL import Image
 from babeldoc.babeldoc_exception.BabelDOCException import ExtractTextError
@@ -8,7 +9,7 @@ from types import MethodType
 
 from babeldoc.format.pdf.document_il.midend.paragraph_finder import ParagraphFinder
 
-from core.image_translate import translate_image
+from core.image_translate import translate_image, prepare_text_overlay
 
 logger = logging.getLogger(__name__)
 
@@ -52,15 +53,148 @@ def new_update_page_content_stream(
         # 处理图片
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
-        new_image = translate_image(image, translation_config)
+        # 判断是否启用“文字覆写”模式
+        overlay_enabled = bool(getattr(translation_config, "enable_image_text_overlay", False))
+        if overlay_enabled:
+            # 1) 生成清理后的背景与覆写项
+            cleaned_image, overlay_items = prepare_text_overlay(image, translation_config)
 
-        # 转字节流
-        img_bytes = io.BytesIO()
-        new_image.save(img_bytes, format="PNG")
-        img_bytes = img_bytes.getvalue()
+            # 2) 插入清理后的图片作为背景
+            bg_bytes = io.BytesIO()
+            cleaned_image.save(bg_bytes, format="PNG")
+            bg_bytes = bg_bytes.getvalue()
+            pg.insert_image(bbox, stream=bg_bytes)
 
-        # 在原位置插入新图
-        pg.insert_image(bbox, stream=img_bytes)
+            # 3) 字体选择与传递（兼容无 Document.insert_font 的环境）
+            # 说明：部分 PyMuPDF 版本不存在 Document.insert_font。
+            # 这里不进行文档级注册，而是直接在 Page.insert_textbox 调用中传入 fontfile。
+            # 要求：当传入 fontfile 时，fontname 不可为保留名（如 "helv"、"tiro" 等）。
+            font_path = None
+            try:
+                from core.path_util import resource_path as _rp
+                font_path = _rp('fonts/SourceHanSansCN-Regular.ttf')
+            except Exception:
+                font_path = None
+            # 默认使用自定义名称，避免与保留名冲突
+            overlay_fontname = "OverlaySansCN"
+
+            # 4) 将文字按坐标映射填充到 PDF
+            x0_pdf, y0_pdf, x1_pdf, y1_pdf = bbox
+            img_w, img_h = image.size
+            scale_x = (x1_pdf - x0_pdf) / float(img_w or 1)
+            scale_y = (y1_pdf - y0_pdf) / float(img_h or 1)
+
+            for item in overlay_items:
+                try:
+                    (ix0, iy0, ix1, iy1) = item.get("region", (0, 0, 0, 0))
+                    text = str(item.get("text", ""))
+                    fontsize_px = float(item.get("font_size", 12) or 12)
+                    # 映射到 PDF 坐标
+                    px0 = x0_pdf + ix0 * scale_x
+                    py0 = y0_pdf + iy0 * scale_y
+                    px1 = x0_pdf + ix1 * scale_x
+                    py1 = y0_pdf + iy1 * scale_y
+
+                    rect = fitz.Rect(px0, py0, px1, py1)
+                    # 插入文本框（左上对齐，尽量在框内排版）
+                    # 将像素字体大小按垂直缩放映射到 PDF 点大小
+                    pdf_fontsize = max(4.0, fontsize_px * float(scale_y))
+                    # 组装字体参数：如有字体文件，按非保留名 + fontfile 方式传入
+                    font_kwargs = {}
+                    try:
+                        import os
+                        if font_path and os.path.exists(font_path):
+                            font_kwargs = {
+                                "fontname": overlay_fontname,
+                                "fontfile": font_path,
+                            }
+                        else:
+                            font_kwargs = {"fontname": "helv"}
+                    except Exception:
+                        font_kwargs = {"fontname": "helv"}
+
+                    # 首选：Page.insert_textbox（带字体文件）。返回值为插入的行数。
+                    inserted_lines = None
+                    try:
+                        inserted_lines = pg.insert_textbox(
+                            rect,
+                            text,
+                            fontsize=pdf_fontsize,
+                            color=(0, 0, 0),
+                            align=0,  # 左上
+                            **font_kwargs,
+                        )
+                    except Exception as e_ins:
+                        inserted_lines = -1
+                        logger.warning(f"[overlay] Page.insert_textbox 异常，将尝试回退: {e_ins}")
+
+                    # 若 Page.insert_textbox 未插入任何文本（返回<=0），执行回退策略
+                    if not isinstance(inserted_lines, (int, float)) or inserted_lines <= 0:
+                        # 回退一：TextWriter + Font
+                        try:
+                            tw = fitz.TextWriter(pg.rect)
+                            tw.color = (0, 0, 0)
+                            font_obj = None
+                            if "fontfile" in font_kwargs and font_kwargs.get("fontfile"):
+                                font_obj = fitz.Font(fontfile=font_kwargs["fontfile"])  # 嵌入自定义字体
+                            tw.fill_textbox(rect, text, font=font_obj, fontsize=pdf_fontsize)
+                            tw.write_text(pg)
+                            logger.debug("[overlay] 已使用 TextWriter 回退写入文本")
+                        except Exception as e_tw:
+                            logger.warning(f"[overlay] TextWriter 回退失败，将尝试 Shape.insert_textbox: {e_tw}")
+                            # 回退二：Shape.insert_textbox（更老版本兼容）
+                            try:
+                                shape = pg.new_shape()
+                                import os
+                                if font_path and os.path.exists(font_path):
+                                    shape.insert_textbox(
+                                        rect,
+                                        text,
+                                        fontsize=pdf_fontsize,
+                                        fontname=overlay_fontname,
+                                        fontfile=font_path,
+                                        align=0,
+                                    )
+                                else:
+                                    shape.insert_textbox(
+                                        rect,
+                                        text,
+                                        fontsize=pdf_fontsize,
+                                        fontname="helv",
+                                        align=0,
+                                    )
+                                shape.commit()
+                                logger.debug("[overlay] 已使用 Shape.insert_textbox 回退写入文本")
+                            except Exception as e_shape:
+                                logger.error(f"[overlay] 文本覆写失败（所有回退均失败）: {e_shape}")
+
+                    # 质量控制：±2px 误差检测（线性映射应趋近 0）
+                    # 将 PDF 坐标逆映射回图像坐标，计算四角误差
+                    def _inv(px, py):
+                        return ((px - x0_pdf) / scale_x, (py - y0_pdf) / scale_y)
+                    corners_img = [(ix0, iy0), (ix1, iy0), (ix1, iy1), (ix0, iy1)]
+                    corners_pdf = [(px0, py0), (px1, py0), (px1, py1), (px0, py1)]
+                    max_err = 0.0
+                    for (px, py), (ix, iy) in zip(corners_pdf, corners_img):
+                        rx, ry = _inv(px, py)
+                        err = max(abs(rx - ix), abs(ry - iy))
+                        if err > max_err:
+                            max_err = err
+                    if max_err > 2.0:
+                        logger.warning(f"[overlay] 坐标映射误差超限: max_err={max_err:.2f}px, region={item.get('region')}, page={page.page_number}")
+                except Exception as e:
+                    logger.error(f"[overlay] 绘制文字失败: {e}")
+        else:
+            # 走原有“整图回写”流程
+            new_image = translate_image(image, translation_config)
+
+            # 转字节流
+            img_bytes = io.BytesIO()
+            new_image.save(img_bytes, format="PNG")
+            img_bytes = img_bytes.getvalue()
+
+            # 在原位置插入新图
+            pg.insert_image(bbox, stream=img_bytes)
     unhook_trans(translation_config)
 
 def new_process(self, document):

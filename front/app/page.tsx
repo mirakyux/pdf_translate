@@ -40,6 +40,7 @@ export default function Home() {
   const [qps, setQps] = useState(10);
   const [debug, setDebug] = useState(false);
   const [translateImages, setTranslateImages] = useState(true); // 实验性：翻译图片（默认勾选）
+  const [imageTextOverlay, setImageTextOverlay] = useState(false); // 实验性：文字覆写（仅在翻译图片开启时生效）
   const [model, setModel] = useState("gpt-4o-mini");
 
   // 任务
@@ -256,7 +257,16 @@ export default function Home() {
       const res = await uploadFile(file);
       setFileId(res.file_id);
       // 2) 立刻按当前配置启动翻译
-      const startRes = await startTranslation({ file_id: res.file_id, lang_in: langIn, lang_out: langOut, qps, debug, model, translate_images_experimental: translateImages });
+      const startRes = await startTranslation({
+        file_id: res.file_id,
+        lang_in: langIn,
+        lang_out: langOut,
+        qps,
+        debug,
+        model,
+        translate_images_experimental: translateImages,
+        image_text_overlay: translateImages ? imageTextOverlay : false,
+      });
       // 保存 owner_token（与 task_id 关联），用于下载校验
       if (startRes?.task_id && startRes?.owner_token) {
         setOwnerTokens((prev) => {
@@ -444,12 +454,39 @@ export default function Home() {
               <Label htmlFor="translateImages">翻译图片</Label>
               <span className="ml-1 inline-flex items-center rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">实验性</span>
             </div>
+            {translateImages && (
+              <div className="ml-6 flex items-center gap-2">
+                <input
+                  id="imageTextOverlay"
+                  type="checkbox"
+                  checked={imageTextOverlay}
+                  onChange={(e) => setImageTextOverlay(e.target.checked)}
+                />
+                <Label htmlFor="imageTextOverlay">文字覆写</Label>
+                <span className="ml-1 inline-flex items-center rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">实验性</span>
+              </div>
+            )}
           </div>
           {/* 底部提交按钮（保持在面板底部） */}
           <div className="mt-6 flex justify-end">
-            <Button disabled={!file || uploading} onClick={onUploadAndStart}>
-              {uploading ? "提交中..." : submitted ? "提交完成" : "提交"}
-            </Button>
+            {(() => {
+              const disabled = !file || uploading;
+              const title = !file
+                ? "请选择 PDF 文件后提交"
+                : uploading
+                ? "正在提交，请稍候"
+                : undefined;
+              return (
+                <Button
+                  disabled={disabled}
+                  aria-disabled={disabled}
+                  title={title}
+                  onClick={onUploadAndStart}
+                >
+                  {uploading ? "提交中..." : submitted ? "提交完成" : "提交"}
+                </Button>
+              );
+            })()}
           </div>
           {uploadError && <p className="mt-2 text-sm text-red-600">{uploadError}</p>}
 

@@ -87,9 +87,12 @@ def list_tasks(session: Session | None = None) -> List[Dict]:
                 tie = cfg.get("translate_images_experimental")
                 if isinstance(tie, bool):
                     translate_images_experimental = tie
+                # 新增：文字覆写开关
+                image_text_overlay = cfg.get("image_text_overlay") if isinstance(cfg, dict) else None
             except Exception:
                 owner_ip = None
                 translate_images_experimental = None
+                image_text_overlay = None
 
             # 原始上传文件名（若能从 uploads 表查到）
             original_filename = None
@@ -109,6 +112,7 @@ def list_tasks(session: Session | None = None) -> List[Dict]:
                 "source_lang": obj.source_lang,
                 "target_lang": obj.target_lang,
                 "translate_images_experimental": translate_images_experimental,
+                "image_text_overlay": image_text_overlay,
                 "progress": obj.progress,
                 "stage": obj.stage,
                 "start_time": obj.start_time,
@@ -179,6 +183,7 @@ def list_tasks_db(
             # 解析 data JSON
             owner_ip = None
             translate_images_experimental = None
+            image_text_overlay = None
             data = {}
             try:
                 data = json.loads(obj.data) if obj.data else {}
@@ -187,10 +192,12 @@ def list_tasks_db(
                 tie = cfg.get("translate_images_experimental")
                 if isinstance(tie, bool):
                     translate_images_experimental = tie
+                image_text_overlay = cfg.get("image_text_overlay") if isinstance(cfg, dict) else None
             except Exception:
                 data = {}
                 owner_ip = None
                 translate_images_experimental = None
+                image_text_overlay = None
 
             # 原始上传文件名（通过 uploads 表查询）
             original_filename = None
@@ -211,6 +218,7 @@ def list_tasks_db(
                 "source_lang": obj.source_lang,
                 "target_lang": obj.target_lang,
                 "translate_images_experimental": translate_images_experimental,
+                "image_text_overlay": image_text_overlay,
                 "progress": obj.progress,
                 "stage": obj.stage,
                 "start_time": obj.start_time,

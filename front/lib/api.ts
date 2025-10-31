@@ -18,6 +18,7 @@ export type TranslationRequest = {
   glossary_ids?: string[];
   model?: string;
   translate_images_experimental?: boolean; // 实验性：翻译图片
+  image_text_overlay?: boolean; // 实验性：文字覆写（仅在翻译图片开启时生效）
 };
 
 export type StartTranslationResponse = {
@@ -34,6 +35,7 @@ export type TaskItem = {
   source_lang: string;
   target_lang: string;
   translate_images_experimental?: boolean;
+  image_text_overlay?: boolean;
   progress: number;
   stage: string;
   start_time: string | null;

@@ -335,7 +335,8 @@ export default function TaskSidebar({
                     const displayName = rawName.replace(/\.pdf$/i, "");
                     // 合并语言与图片翻译配置
                     const imgEnabled = (typeof t.translate_images_experimental === "boolean" ? t.translate_images_experimental : (/图片翻译已启用/.test(String(t.message||""))));
-                    const configDisplay = `${t.source_lang}→${t.target_lang}${imgEnabled ? ", Img" : ""}`;
+                    const overlayEnabled = !!t.image_text_overlay;
+                    const configDisplay = `${t.source_lang}→${t.target_lang}${imgEnabled ? ", Img" : ""}${imgEnabled && overlayEnabled ? " + Overlay" : ""}`;
                     // 统一时间格式 yyyy-MM-dd hh:mm:ss（本地时区）
                     const fmt = (s: string | null | undefined) => {
                       if (!s) return "-";

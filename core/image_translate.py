@@ -240,6 +240,125 @@ def translate_image(image: Image.Image,  config) -> Image.Image:
 
     return fn_image
 
+def prepare_text_overlay(image: Image.Image, config) -> Tuple[Image.Image, List[Dict]]:
+    """生成“文字覆写”所需的数据：
+    - 返回抹除文字后的干净背景图（作为 PDF 背景使用）
+    - 返回需要覆写的文字项列表：[{"region": (x0,y0,x1,y1), "text": str, "font_size": int}]
+
+    说明：
+    - 只对需要更新的区域进行 inpaint 与覆写。
+    - 逻辑基本与 translate_image 一致，只是最终不在图像上绘制文本，而是返回绘制任务供 PDF 层处理。
+    - 对于表格区域（cls==5），进行递归处理，子区域的坐标将被平移映射回父图像坐标。
+    """
+    np_image = np.array(image)
+    try:
+        result = config.doc_layout_model.predict(np_image)[0]
+    except Exception as e:
+        ts = datetime.now().isoformat()
+        logger.error(f"[{ts}] 文档布局检测模型异常（overlay），已返回原图: {e}")
+        return image.copy(), []
+
+    boxes = [item for item in result.boxes if item.cls not in [2, 8, 9]]
+    boxes = _remove_fully_contained_boxes(boxes, tolerance=2.0)
+
+    regions_to_clean: List[Tuple[int, int, int, int]] = []
+    overlay_items: List[Dict] = []
+
+    for box in boxes:
+        x0, y0, x1, y1 = box.xyxy
+        region: Tuple[int, int, int, int] = (int(x0), int(y0), int(x1), int(y1))
+
+        if (box.cls == 5):
+            # 表格：递归处理并聚合结果
+            try:
+                sub_img = image.crop(region)
+                cleaned_sub, sub_items = prepare_text_overlay(sub_img, config)
+                # 将子图的清理结果贴回
+                image.paste(cleaned_sub, region)
+                # 平移子项坐标
+                dx, dy = region[0], region[1]
+                for it in sub_items:
+                    rx0, ry0, rx1, ry1 = it.get("region", (0, 0, 0, 0))
+                    overlay_items.append({
+                        "region": (rx0 + dx, ry0 + dy, rx1 + dx, ry1 + dy),
+                        "text": it.get("text", ""),
+                        "font_size": it.get("font_size", 12),
+                    })
+            except Exception as e:
+                ts = datetime.now().isoformat()
+                logger.error(f"[{ts}] 表格子区域 overlay 处理失败，保持原样: region={region}, reason={e}")
+            # 注意：表格区域已在子处理内完成清理，这里无需继续 OCR
+            continue
+
+        # OCR 识别并提取文本
+        try:
+            region_image = image.crop(region)
+            ocr_engine = get_ocr_engine()
+            ocr_result = ocr_engine(region_image)
+            try:
+                lang_in = getattr(config, "lang_in", None)
+            except Exception:
+                lang_in = None
+            try:
+                smart_breaks = bool(getattr(config, "smart_line_breaks", True))
+            except Exception:
+                smart_breaks = True
+            debug_mode = False
+            try:
+                debug_mode = bool(getattr(config, "debug", False))
+            except Exception:
+                debug_mode = False
+            tuning = None
+            try:
+                tuning = getattr(config, "smart_line_breaks_tuning", None)
+            except Exception:
+                tuning = None
+            simple_mode = True
+            try:
+                simple_mode = bool(getattr(config, "simple_line_join", True))
+            except Exception:
+                simple_mode = True
+            src_text = _extract_texts(ocr_result, lang_in=lang_in, smart_breaks=smart_breaks, debug=debug_mode, tuning=tuning, simple_mode=simple_mode)
+        except Exception as e:
+            ts = datetime.now().isoformat()
+            logger.error(f"[{ts}] 区域OCR失败（overlay），保持原图: region={region}, reason={e}")
+            continue
+
+        # 翻译
+        translated_text: Optional[str] = None
+        try:
+            candidate = config.translator.translate(src_text) if src_text else ""
+            translated_text = candidate if isinstance(candidate, str) else None
+        except Exception as e:
+            translated_text = None
+            ts = datetime.now().isoformat()
+            logger.error(f"[{ts}] 区域翻译失败（overlay），保持原样: region={region}, reason={e}")
+            continue
+
+        if translated_text is None or translated_text == src_text:
+            # 无变化或失败：跳过
+            continue
+
+        # 纳入清理与覆写项
+        regions_to_clean.append(region)
+        x1, y1, x2, y2 = region
+        w = max(1, x2 - x1)
+        h = max(1, y2 - y1)
+        fs = calculate_auto_font_size(translated_text, w, h, 'horizontal', DEFAULT_FONT_RELATIVE_PATH)
+        overlay_items.append({
+            "region": region,
+            "text": translated_text or "",
+            "font_size": fs,
+        })
+
+    # 若没有需要清理的区域，直接返回拷贝
+    if not regions_to_clean:
+        return image.copy(), []
+
+    # 仅对需要处理的区域进行 inpaint
+    cleaned = clean(image, regions_to_clean, method="telea")
+    return cleaned, overlay_items
+
 def get_font(font_family_relative_path: str = DEFAULT_FONT_RELATIVE_PATH, font_size: int = 30):
     """加载字体文件（带缓存）。
 

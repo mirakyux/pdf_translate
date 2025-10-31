@@ -170,6 +170,11 @@ def _build_translation_config(task_id: str, request) -> TranslationConfig:
         setattr(config, "enable_image_experimental", bool(getattr(request, "translate_images_experimental", False)))
     except Exception:
         pass
+    # 实验性文字覆写开关（通过动态属性传递给 hook）
+    try:
+        setattr(config, "enable_image_text_overlay", bool(getattr(request, "image_text_overlay", False)))
+    except Exception:
+        pass
     # 智能换行/连接判断（OCR 文本后处理），默认开启，可按需关闭
     try:
         setattr(config, "smart_line_breaks", True)
@@ -214,10 +219,10 @@ async def start_translation_service(request) -> Dict[str, str]:
         "progress": 0,
         "stage": "初始化",
         # 在任务日志中明确标记该功能为实验性特性
-        "message": (
-            "实验性特性：图片翻译已启用" if bool(getattr(request, "translate_images_experimental", False))
-            else "实验性特性：图片翻译未启用"
-        ),
+        "message": ("实验性特性：" + (
+            "图片翻译已启用；文字覆写已启用" if (bool(getattr(request, "translate_images_experimental", False)) and bool(getattr(request, "image_text_overlay", False))) else
+            ("图片翻译已启用（未启用文字覆写）" if bool(getattr(request, "translate_images_experimental", False)) else "图片翻译未启用")
+        )),
         "config": request_config,
         "owner_token": owner_token,
         "owner_ip": owner_ip or "",
